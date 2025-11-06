@@ -1,15 +1,13 @@
 """
-预制件模块导出
+浏览器自动化代理预制件
 
-这个文件定义了预制件对外暴露的函数列表。
+通过自然语言执行浏览器自动化任务。
 """
 
-from .main import add_numbers, echo, fetch_weather, greet, process_text_file
+from .main import execute_browser_task
 
 __all__ = [
-    "greet",
-    "echo",
-    "add_numbers",
-    "process_text_file",
-    "fetch_weather",
+    "execute_browser_task",
 ]
+
+__version__ = "0.1.0"

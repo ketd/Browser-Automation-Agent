@@ -1,78 +1,118 @@
 """
-预制件核心逻辑模块
+浏览器自动化代理预制件
 
-这是一个示例预制件，展示了如何创建可被 AI 调用的函数。
-所有暴露给 AI 的函数都必须在此文件中定义。
-
-📁 文件路径约定（重要！）：
-- 输入文件路径：data/inputs/{files.key}/
-  例如：manifest 中 files.input → data/inputs/input/
-  例如：manifest 中 files.video → data/inputs/video/
-- 输出文件：data/outputs/
-- Gateway 自动下载文件到 inputs，自动上传 outputs 中的文件
-
-⚠️ 常见错误：
-- ❌ 错误：DATA_INPUTS = Path("data/inputs")
-- ✅ 正确：DATA_INPUTS = Path("data/inputs/input")  # 如果 manifest 中 key 是 "input"
-
-📖 完整开发指南请查看：PREFAB_GUIDE.md
-
-🌊 流式函数说明：
-- 使用生成器函数（yield）实现流式返回
-- 在 manifest 中设置 "streaming": true
-- 适用于实时输出、进度报告、大数据处理等场景
+通过自然语言执行浏览器自动化任务,支持信息提取和文件下载。
+调用后端浏览器自动化 API 服务完成任务。
 """
 
 import os
-import time
 from pathlib import Path
-from typing import Any, Dict, Iterator
+from typing import Any, Dict, Optional
+import requests
 
-# 固定路径常量
-# 文件组按 manifest 中的 key 组织（这里是 "input"）
-# 如果你的 manifest 中使用不同的 key，请相应修改路径
-# 例如：files.video → Path("data/inputs/video")
-DATA_INPUTS = Path("data/inputs/input")
+# 输出文件路径（Gateway 会自动上传此目录中的文件）
 DATA_OUTPUTS = Path("data/outputs")
 
 
-def greet(name: str = "World") -> dict:
+def execute_browser_task(url: str, query: str, timeout: int = 600) -> dict:
     """
-    向用户问候
+    执行浏览器自动化任务
 
-    这是一个简单的示例函数，展示了预制件函数的基本结构。
+    通过自然语言描述任务，自动执行浏览器操作。
+    支持网页访问、信息提取、文件下载等操作。
 
     Args:
-        name: 要问候的名字，默认为 "World"
+        url: 目标网页 URL
+        query: 任务描述（自然语言），例如：
+            - "提取页面的主要内容"
+            - "下载最新的PDF文件"
+            - "找到逾期承兑人名单并下载"
+        timeout: 任务超时时间（秒），默认 600（10分钟）
 
     Returns:
-        包含问候结果的字典
+        包含任务执行结果的字典：
+        {
+            "success": True/False,
+            "message": "任务执行描述",
+            "result": {
+                "type": "text" | "file" | "mixed",
+                "data": {...},        # type=text 时存在
+                "files": [...]        # type=file 时存在
+            },
+            "error": "错误信息"  # 失败时存在
+        }
 
     Examples:
-        >>> greet()
-        {'success': True, 'message': 'Hello, World!', 'name': 'World'}
+        >>> execute_browser_task(
+        ...     url="https://example.com",
+        ...     query="提取页面标题和主要内容"
+        ... )
+        {'success': True, 'message': '成功提取页面内容', 'result': {...}}
 
-        >>> greet(name="Alice")
-        {'success': True, 'message': 'Hello, Alice!', 'name': 'Alice'}
+        >>> execute_browser_task(
+        ...     url="https://example.com/files",
+        ...     query="下载最新的PDF文件"
+        ... )
+        {'success': True, 'message': '成功下载1个文件', 'result': {...}}
     """
     try:
         # 参数验证
-        if not name or not isinstance(name, str):
+        if not url or not isinstance(url, str):
             return {
                 "success": False,
-                "error": "name 参数必须是非空字符串",
-                "error_code": "INVALID_NAME"
+                "error": "url 参数必须是非空字符串",
+                "error_code": "INVALID_URL"
             }
 
-        # 生成问候消息
-        message = f"Hello, {name}!"
+        if not query or not isinstance(query, str):
+            return {
+                "success": False,
+                "error": "query 参数必须是非空字符串",
+                "error_code": "INVALID_QUERY"
+            }
 
+        # 获取后端 API 地址
+        api_base_url = os.environ.get('BROWSER_API_URL')
+        if not api_base_url:
+            return {
+                "success": False,
+                "error": "未配置 BROWSER_API_URL 环境变量",
+                "error_code": "MISSING_API_URL"
+            }
+
+        # 构建完整查询（包含 URL）
+        full_query = f"访问 {url}，然后{query}"
+
+        # 调用后端 API
+        api_url = f"{api_base_url.rstrip('/')}/agent/task"
+        response = requests.post(
+            api_url,
+            json={"query": full_query},
+            timeout=timeout
+        )
+
+        # 检查 HTTP 状态
+        response.raise_for_status()
+        api_result = response.json()
+
+        # 解析 API 返回结果
+        if api_result.get("status") == "success":
+            return _process_success_result(api_result)
+        else:
+            return _process_error_result(api_result)
+
+    except requests.exceptions.Timeout:
         return {
-            "success": True,
-            "message": message,
-            "name": name
+            "success": False,
+            "error": f"任务超时（{timeout}秒）",
+            "error_code": "TIMEOUT"
         }
-
+    except requests.exceptions.RequestException as e:
+        return {
+            "success": False,
+            "error": f"API 请求失败: {str(e)}",
+            "error_code": "API_ERROR"
+        }
     except Exception as e:
         return {
             "success": False,
@@ -81,300 +121,188 @@ def greet(name: str = "World") -> dict:
         }
 
 
-def echo(text: str) -> dict:
+def _process_success_result(api_result: Dict[str, Any]) -> dict:
     """
-    回显输入的文本
-
-    这个函数演示了基本的输入输出处理。
+    处理成功的 API 结果
 
     Args:
-        text: 要回显的文本
+        api_result: API 返回的原始结果
 
     Returns:
-        包含回显结果的字典
+        处理后的结果字典
     """
-    try:
-        if not text:
+    result_data = api_result.get("result")
+    response_text = api_result.get("response", "任务执行成功")
+
+    # 情况1: 返回文件引用
+    if result_data and result_data.get("type") == "file_reference":
+        file_info = _download_file_from_api(api_result)
+        if file_info:
             return {
-                "success": False,
-                "error": "text 参数不能为空",
-                "error_code": "EMPTY_TEXT"
+                "success": True,
+                "message": response_text,
+                "result": {
+                    "type": "file",
+                    "files": [file_info]
+                }
             }
-
-        return {
-            "success": True,
-            "original": text,
-            "echo": text,
-            "length": len(text)
-        }
-
-    except Exception as e:
-        return {
-            "success": False,
-            "error": str(e),
-            "error_code": "UNEXPECTED_ERROR"
-        }
-
-
-def add_numbers(a: float, b: float) -> dict:
-    """
-    计算两个数字的和
-
-    这个函数演示了数值计算的基本模式。
-
-    Args:
-        a: 第一个数字
-        b: 第二个数字
-
-    Returns:
-        包含计算结果的字典
-    """
-    try:
-        result = a + b
-        return {
-            "success": True,
-            "a": a,
-            "b": b,
-            "sum": result
-        }
-
-    except Exception as e:
-        return {
-            "success": False,
-            "error": str(e),
-            "error_code": "CALCULATION_ERROR"
-        }
-
-
-def process_text_file(operation: str = "uppercase") -> dict:
-    """
-    处理文本文件（文件处理示例）
-
-    这个函数演示了文件处理方式：
-    - 文件不再作为参数传入
-    - Gateway 自动下载到 data/inputs/
-    - Prefab 自动扫描 data/inputs/
-    - 输出写入 data/outputs/
-    - Gateway 自动上传并在响应中返回文件 URL
-
-    📁 文件约定：
-    - 输入：自动扫描 data/inputs/（Gateway 已下载）
-    - 输出：写入 data/outputs/（Gateway 会自动上传）
-    - 返回值：不包含文件路径（由 Gateway 管理）
-
-    Args:
-        operation: 操作类型（uppercase, lowercase, reverse）
-
-    Returns:
-        包含处理结果的字典（不包含文件路径）
-    """
-    try:
-        # 自动扫描 data/inputs 目录
-        input_files = list(DATA_INPUTS.glob("*"))
-        if not input_files:
-            return {
-                "success": False,
-                "error": "未找到输入文件",
-                "error_code": "NO_INPUT_FILE"
-            }
-
-        # 获取第一个文件
-        input_path = input_files[0]
-
-        # 读取文件内容
-        content = input_path.read_text(encoding="utf-8")
-
-        # 执行操作
-        if operation == "uppercase":
-            result = content.upper()
-        elif operation == "lowercase":
-            result = content.lower()
-        elif operation == "reverse":
-            result = content[::-1]
         else:
             return {
                 "success": False,
-                "error": f"不支持的操作: {operation}",
-                "error_code": "INVALID_OPERATION"
+                "error": "文件下载失败",
+                "error_code": "FILE_DOWNLOAD_ERROR"
             }
+
+    # 情况2: 返回内联文件
+    elif result_data and result_data.get("type") == "file_inline":
+        file_info = _save_inline_file(result_data)
+        if file_info:
+            return {
+                "success": True,
+                "message": response_text,
+                "result": {
+                    "type": "file",
+                    "files": [file_info]
+                }
+            }
+        else:
+            return {
+                "success": False,
+                "error": "文件保存失败",
+                "error_code": "FILE_SAVE_ERROR"
+            }
+
+    # 情况3: 返回文本数据
+    elif result_data and result_data.get("type") == "text":
+        return {
+            "success": True,
+            "message": response_text,
+            "result": {
+                "type": "text",
+                "data": {
+                    "content": result_data.get("content", "")
+                }
+            }
+        }
+
+    # 情况4: 无具体结果，只有响应文本
+    else:
+        return {
+            "success": True,
+            "message": response_text,
+            "result": {
+                "type": "text",
+                "data": {
+                    "content": response_text
+                }
+            }
+        }
+
+
+def _process_error_result(api_result: Dict[str, Any]) -> dict:
+    """
+    处理失败的 API 结果
+
+    Args:
+        api_result: API 返回的原始结果
+
+    Returns:
+        错误结果字典
+    """
+    error_info = api_result.get("error")
+    if isinstance(error_info, dict):
+        error_message = error_info.get("message", "任务执行失败")
+        error_code = error_info.get("code", "TASK_FAILED")
+    else:
+        error_message = str(error_info) if error_info else "任务执行失败"
+        error_code = "TASK_FAILED"
+
+    return {
+        "success": False,
+        "error": error_message,
+        "error_code": error_code
+    }
+
+
+def _download_file_from_api(api_result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    从 API 结果中下载文件到 data/outputs/
+
+    Args:
+        api_result: API 返回的原始结果
+
+    Returns:
+        文件信息字典，失败返回 None
+    """
+    try:
+        result_data = api_result.get("result", {})
+        file_id = result_data.get("file_id")
+        filename = result_data.get("filename", "downloaded_file")
+        mime_type = result_data.get("mime_type", "application/octet-stream")
+
+        if not file_id:
+            return None
+
+        # 构建下载 URL
+        api_base_url = os.environ.get('BROWSER_API_URL')
+        download_url = f"{api_base_url.rstrip('/')}/downloads/{file_id}"
+
+        # 下载文件
+        response = requests.get(download_url, timeout=60)
+        response.raise_for_status()
 
         # 确保输出目录存在
         DATA_OUTPUTS.mkdir(parents=True, exist_ok=True)
 
-        # 写入输出文件（Gateway 会自动上传）
-        output_filename = f"processed_{input_path.name}"
-        output_path = DATA_OUTPUTS / output_filename
-        output_path.write_text(result, encoding="utf-8")
+        # 保存文件
+        output_path = DATA_OUTPUTS / filename
+        output_path.write_bytes(response.content)
 
-        # 返回结果（不包含文件路径）
         return {
-            "success": True,
-            "operation": operation,
-            "original_length": len(content),
-            "processed_length": len(result)
+            "filename": filename,
+            "size_bytes": len(response.content),
+            "mime_type": mime_type
         }
 
-    except Exception as e:
-        return {
-            "success": False,
-            "error": str(e),
-            "error_code": "PROCESSING_ERROR"
-        }
+    except Exception:
+        return None
 
 
-def fetch_weather(city: str) -> dict:
+def _save_inline_file(result_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """
-    获取指定城市的天气信息（示例函数，演示 secrets 的使用）
-
-    这个函数演示了如何在预制件中使用密钥（secrets）。
-    平台会自动将用户配置的密钥注入到环境变量中。
-
-    注意：这是一个演示函数，实际不会调用真实的天气 API。
+    保存内联文件（base64 编码）到 data/outputs/
 
     Args:
-        city: 要查询天气的城市名称
+        result_data: 包含文件内容的结果数据
 
     Returns:
-        包含天气信息的字典
-
-    Examples:
-        >>> fetch_weather(city="北京")
-        {'success': True, 'city': '北京', 'temperature': 22.5, 'condition': '晴天'}
+        文件信息字典，失败返回 None
     """
     try:
-        # 从环境变量中获取 API Key（平台会自动注入）
-        api_key = os.environ.get('WEATHER_API_KEY')
+        import base64
 
-        # 验证密钥是否已配置
-        if not api_key:
-            return {
-                "success": False,
-                "error": "未配置 WEATHER_API_KEY，请在平台上配置该密钥",
-                "error_code": "MISSING_API_KEY"
-            }
+        filename = result_data.get("filename", "downloaded_file")
+        mime_type = result_data.get("mime_type", "application/octet-stream")
+        content_base64 = result_data.get("content")
 
-        # 验证参数
-        if not city or not isinstance(city, str):
-            return {
-                "success": False,
-                "error": "city 参数必须是非空字符串",
-                "error_code": "INVALID_CITY"
-            }
+        if not content_base64:
+            return None
 
-        # 这里是演示代码，实际应该调用真实的天气 API
-        # import requests
-        # response = requests.get(
-        #     f"https://api.weather-provider.com/current",
-        #     params={"city": city, "key": api_key}
-        # )
-        # data = response.json()
+        # 解码 base64 内容
+        file_bytes = base64.b64decode(content_base64)
 
-        # 演示：返回模拟数据
+        # 确保输出目录存在
+        DATA_OUTPUTS.mkdir(parents=True, exist_ok=True)
+
+        # 保存文件
+        output_path = DATA_OUTPUTS / filename
+        output_path.write_bytes(file_bytes)
+
         return {
-            "success": True,
-            "city": city,
-            "temperature": 22.5,
-            "condition": "晴天",
-            "note": "这是演示数据，未调用真实 API"
+            "filename": filename,
+            "size_bytes": len(file_bytes),
+            "mime_type": mime_type
         }
 
-    except Exception as e:
-        return {
-            "success": False,
-            "error": str(e),
-            "error_code": "UNEXPECTED_ERROR"
-        }
-
-
-def count_stream(count: int = 10, interval: float = 0.5) -> Iterator[Dict[str, Any]]:
-    """
-    流式计数器（演示流式函数的实现）
-
-    这是一个流式函数示例，展示如何使用生成器实现实时输出。
-    适用于需要实时反馈的场景，如进度报告、实时数据处理等。
-
-    🌊 流式函数特点：
-    - 使用 Iterator[Dict] 作为返回类型
-    - 使用 yield 逐步返回结果
-    - 在 manifest 中设置 "streaming": true
-    - 客户端通过 SSE (Server-Sent Events) 接收实时数据
-
-    Args:
-        count: 计数总数，默认 10
-        interval: 每次计数的间隔秒数，默认 0.5
-
-    Yields:
-        dict: SSE 事件数据，包含以下字段：
-            - type: 事件类型 ("start" | "progress" | "done" | "error")
-            - data: 事件数据
-            - metadata: 可选的元数据
-
-    Examples:
-        >>> for event in count_stream(count=5, interval=0.1):
-        ...     print(event)
-        {"type": "start", "data": {"total": 5}}
-        {"type": "progress", "data": {"current": 1, "total": 5, "percentage": 20}}
-        {"type": "progress", "data": {"current": 2, "total": 5, "percentage": 40}}
-        ...
-        {"type": "done", "data": {"total": 5, "completed": True}}
-    """
-    try:
-        # 参数验证
-        if count <= 0:
-            yield {
-                "type": "error",
-                "data": "count 必须大于 0",
-                "error_code": "INVALID_COUNT"
-            }
-            return
-
-        if interval < 0:
-            yield {
-                "type": "error",
-                "data": "interval 不能为负数",
-                "error_code": "INVALID_INTERVAL"
-            }
-            return
-
-        # Step 1: 发送开始事件
-        yield {
-            "type": "start",
-            "data": {
-                "total": count,
-                "interval": interval
-            }
-        }
-
-        # Step 2: 逐步计数并发送进度事件
-        for i in range(1, count + 1):
-            time.sleep(interval)
-
-            percentage = int((i / count) * 100)
-
-            yield {
-                "type": "progress",
-                "data": {
-                    "current": i,
-                    "total": count,
-                    "percentage": percentage,
-                    "message": f"正在计数: {i}/{count}"
-                }
-            }
-
-        # Step 3: 发送完成事件
-        yield {
-            "type": "done",
-            "data": {
-                "total": count,
-                "completed": True,
-                "message": "计数完成"
-            }
-        }
-
-    except Exception as e:
-        # 发送错误事件
-        yield {
-            "type": "error",
-            "data": str(e),
-            "error_code": "UNEXPECTED_ERROR"
-        }
+    except Exception:
+        return None
