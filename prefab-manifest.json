@@ -22,8 +22,8 @@
       "parameters": [
         {
           "name": "urls",
-          "type": "string | array",
-          "description": "目标网页 URL，可以是单个 URL 字符串或 URL 数组。例如：'https://example.com' 或 ['https://example.com', 'https://github.com']",
+          "type": "string",
+          "description": "目标网页 URL。可以是单个 URL 字符串（例如 'https://example.com'）或 URL 数组（例如 ['https://example.com', 'https://github.com']）",
           "required": true
         },
         {
