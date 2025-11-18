@@ -456,7 +456,7 @@ def download_bundle(session_id: str, timeout: int = 120) -> dict:
 
         return {
             "success": True,
-            "message": f"成功下载文件包",
+            "message": "成功下载文件包",
             "files": [filename]
         }
 
