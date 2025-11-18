@@ -4,7 +4,7 @@
 
 import os
 from pathlib import Path
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import Mock, patch
 import pytest
 
 from src.main import execute_browser_task, _process_success_result, _process_error_result
@@ -13,17 +13,23 @@ from src.main import execute_browser_task, _process_success_result, _process_err
 class TestExecuteBrowserTask:
     """测试 execute_browser_task 函数"""
 
-    def test_invalid_url(self):
-        """测试无效的 URL 参数"""
-        result = execute_browser_task(url="", query="测试查询")
+    def test_invalid_url_empty_string(self):
+        """测试空 URL 字符串"""
+        result = execute_browser_task(urls="", query="测试查询")
         assert result["success"] is False
-        assert result["error_code"] == "INVALID_URL"
+        assert "error" in result
+
+    def test_invalid_url_empty_list(self):
+        """测试空 URL 列表"""
+        result = execute_browser_task(urls=[], query="测试查询")
+        assert result["success"] is False
+        assert result["error"] == "URL 列表格式不正确"
 
     def test_invalid_query(self):
         """测试无效的 query 参数"""
-        result = execute_browser_task(url="https://example.com", query="")
+        result = execute_browser_task(urls="https://example.com", query="")
         assert result["success"] is False
-        assert result["error_code"] == "INVALID_QUERY"
+        assert result["error"] == "任务描述不能为空"
 
     def test_missing_api_url(self):
         """测试缺少 BROWSER_API_URL 环境变量"""
@@ -31,11 +37,11 @@ class TestExecuteBrowserTask:
         os.environ.pop('BROWSER_API_URL', None)
 
         result = execute_browser_task(
-            url="https://example.com",
+            urls="https://example.com",
             query="测试查询"
         )
         assert result["success"] is False
-        assert result["error_code"] == "MISSING_API_URL"
+        assert result["error"] == "未配置 API 地址"
 
     @patch.dict(os.environ, {'BROWSER_API_URL': 'http://localhost:52101'})
     @patch('src.main.requests.post')
@@ -48,6 +54,7 @@ class TestExecuteBrowserTask:
             "status": "success",
             "query": "访问 https://example.com，然后提取页面内容",
             "response": "成功提取页面内容",
+            "session_id": "test-session-123",
             "result": {
                 "type": "text",
                 "content": "这是页面内容"
@@ -56,14 +63,14 @@ class TestExecuteBrowserTask:
         mock_post.return_value = mock_response
 
         result = execute_browser_task(
-            url="https://example.com",
+            urls="https://example.com",
             query="提取页面内容"
         )
 
         assert result["success"] is True
         assert result["message"] == "成功提取页面内容"
-        assert result["result"]["type"] == "text"
-        assert result["result"]["data"]["content"] == "这是页面内容"
+        assert result["session_id"] == "test-session-123"
+        assert "files" not in result  # 文本结果不应该有 files 字段
 
     @patch.dict(os.environ, {'BROWSER_API_URL': 'http://localhost:52101'})
     @patch('src.main.requests.post')
@@ -78,6 +85,7 @@ class TestExecuteBrowserTask:
             "status": "success",
             "query": "访问 https://example.com，然后下载PDF文件",
             "response": "成功下载文件",
+            "session_id": "test-session-456",
             "result": {
                 "type": "file_reference",
                 "file_id": "test-file-id",
@@ -98,20 +106,45 @@ class TestExecuteBrowserTask:
         Path('/tmp/test_outputs').mkdir(parents=True, exist_ok=True)
 
         result = execute_browser_task(
-            url="https://example.com",
+            urls="https://example.com",
             query="下载PDF文件"
         )
 
         assert result["success"] is True
         assert result["message"] == "成功下载文件"
-        assert result["result"]["type"] == "file"
-        assert len(result["result"]["files"]) == 1
-        assert result["result"]["files"][0]["filename"] == "test.pdf"
+        assert result["session_id"] == "test-session-456"
+        assert "files" in result
+        assert result["files"] == ["test.pdf"]
 
         # 清理
         output_file = Path('/tmp/test_outputs/test.pdf')
         if output_file.exists():
             output_file.unlink()
+
+    @patch.dict(os.environ, {'BROWSER_API_URL': 'http://localhost:52101'})
+    @patch('src.main.requests.post')
+    def test_multi_urls(self, mock_post):
+        """测试多 URL 支持"""
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "status": "success",
+            "response": "成功访问多个网站",
+            "session_id": "test-session-multi",
+            "result": {
+                "type": "text",
+                "content": "已访问所有网站"
+            }
+        }
+        mock_post.return_value = mock_response
+
+        result = execute_browser_task(
+            urls=["https://example.com", "https://github.com"],
+            query="分别访问并截图"
+        )
+
+        assert result["success"] is True
+        assert result["session_id"] == "test-session-multi"
 
     @patch.dict(os.environ, {'BROWSER_API_URL': 'http://localhost:52101'})
     @patch('src.main.requests.post')
@@ -121,6 +154,7 @@ class TestExecuteBrowserTask:
         mock_response.status_code = 200
         mock_response.json.return_value = {
             "status": "error",
+            "session_id": "test-session-error",
             "error": {
                 "code": "TASK_FAILED",
                 "message": "任务执行失败"
@@ -129,12 +163,13 @@ class TestExecuteBrowserTask:
         mock_post.return_value = mock_response
 
         result = execute_browser_task(
-            url="https://example.com",
+            urls="https://example.com",
             query="测试查询"
         )
 
         assert result["success"] is False
-        assert result["error_code"] == "TASK_FAILED"
+        assert result["error"] == "任务执行失败"
+        assert result["session_id"] == "test-session-error"
 
     @patch.dict(os.environ, {'BROWSER_API_URL': 'http://localhost:52101'})
     @patch('src.main.requests.post')
@@ -144,13 +179,13 @@ class TestExecuteBrowserTask:
         mock_post.side_effect = requests.exceptions.Timeout()
 
         result = execute_browser_task(
-            url="https://example.com",
+            urls="https://example.com",
             query="测试查询",
             timeout=10
         )
 
         assert result["success"] is False
-        assert result["error_code"] == "TIMEOUT"
+        assert result["error"] == "任务超时"
 
     @patch.dict(os.environ, {'BROWSER_API_URL': 'http://localhost:52101'})
     @patch('src.main.requests.post')
@@ -160,12 +195,12 @@ class TestExecuteBrowserTask:
         mock_post.side_effect = requests.exceptions.ConnectionError("连接失败")
 
         result = execute_browser_task(
-            url="https://example.com",
+            urls="https://example.com",
             query="测试查询"
         )
 
         assert result["success"] is False
-        assert result["error_code"] == "API_ERROR"
+        assert result["error"] == "API 请求失败"
 
 
 class TestProcessResults:
@@ -176,6 +211,7 @@ class TestProcessResults:
         api_result = {
             "status": "success",
             "response": "成功提取内容",
+            "session_id": "test-123",
             "result": {
                 "type": "text",
                 "content": "这是内容"
@@ -186,27 +222,28 @@ class TestProcessResults:
 
         assert result["success"] is True
         assert result["message"] == "成功提取内容"
-        assert result["result"]["type"] == "text"
-        assert result["result"]["data"]["content"] == "这是内容"
+        assert result["session_id"] == "test-123"
+        assert "files" not in result
 
     def test_process_success_result_no_result(self):
         """测试处理无具体结果"""
         api_result = {
             "status": "success",
-            "response": "任务完成"
+            "response": "任务完成",
+            "session_id": "test-456"
         }
 
         result = _process_success_result(api_result)
 
         assert result["success"] is True
         assert result["message"] == "任务完成"
-        assert result["result"]["type"] == "text"
-        assert result["result"]["data"]["content"] == "任务完成"
+        assert result["session_id"] == "test-456"
 
     def test_process_error_result_with_dict(self):
         """测试处理错误结果（字典格式）"""
         api_result = {
             "status": "error",
+            "session_id": "test-error-123",
             "error": {
                 "code": "TEST_ERROR",
                 "message": "测试错误"
@@ -217,7 +254,7 @@ class TestProcessResults:
 
         assert result["success"] is False
         assert result["error"] == "测试错误"
-        assert result["error_code"] == "TEST_ERROR"
+        assert result["session_id"] == "test-error-123"
 
     def test_process_error_result_with_string(self):
         """测试处理错误结果（字符串格式）"""
@@ -230,7 +267,7 @@ class TestProcessResults:
 
         assert result["success"] is False
         assert result["error"] == "简单错误信息"
-        assert result["error_code"] == "TASK_FAILED"
+        assert "session_id" not in result  # 没有 session_id
 
 
 if __name__ == "__main__":
