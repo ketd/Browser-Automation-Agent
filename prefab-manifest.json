@@ -1,9 +1,9 @@
 {
   "schema_version": "1.0",
   "id": "browser-automation-agent",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "name": "浏览器自动化代理",
-  "description": "通过自然语言执行浏览器自动化任务，支持网页访问、信息提取和文件下载",
+  "description": "通过自然语言执行浏览器自动化任务，支持网页访问、信息提取和文件下载。支持会话连续性、多 URL 批量处理、文件打包下载",
   "author": "Your Name",
   "github_url": "https://github.com/your-org/browser-automation-agent",
   "tags": [
@@ -18,12 +18,12 @@
   "functions": [
     {
       "name": "execute_browser_task",
-      "description": "执行浏览器自动化任务，支持网页访问、信息提取和文件下载。通过自然语言描述任务，自动执行浏览器操作。",
+      "description": "执行浏览器自动化任务，支持网页访问、信息提取和文件下载。通过自然语言描述任务，自动执行浏览器操作。支持会话连续性，可通过 session_id 保持上下文。支持单个或多个 URL。",
       "parameters": [
         {
-          "name": "url",
-          "type": "string",
-          "description": "目标网页的 URL 地址",
+          "name": "urls",
+          "type": "string | array",
+          "description": "目标网页 URL，可以是单个 URL 字符串或 URL 数组。例如：'https://example.com' 或 ['https://example.com', 'https://github.com']",
           "required": true
         },
         {
@@ -31,6 +31,19 @@
           "type": "string",
           "description": "任务描述（自然语言），例如：'提取页面主要内容'、'下载最新的PDF文件'、'找到逾期承兑人名单并下载'",
           "required": true
+        },
+        {
+          "name": "session_id",
+          "type": "string",
+          "description": "会话ID（可选），用于保持对话连续性。如果提供，将在相同会话中执行任务，可以引用之前的操作上下文。",
+          "required": false
+        },
+        {
+          "name": "timeout",
+          "type": "integer",
+          "description": "任务超时时间（秒），默认 600（10分钟）",
+          "required": false,
+          "default": 600
         }
       ],
       "files": {
@@ -52,68 +65,25 @@
           },
           "message": {
             "type": "string",
-            "description": "任务执行描述信息（成功时）",
-            "optional": true
+            "description": "任务执行描述信息"
           },
-          "result": {
-            "type": "object",
-            "description": "任务结果数据（成功时）",
+          "session_id": {
+            "type": "string",
+            "description": "会话ID，用于后续请求保持上下文或下载文件包"
+          },
+          "files": {
+            "type": "array",
+            "description": "生成的文件列表（仅当有文件时存在）",
             "optional": true,
-            "properties": {
-              "type": {
-                "type": "string",
-                "description": "结果类型：text（文本）、file（文件）、mixed（混合）",
-                "enum": ["text", "file", "mixed"]
-              },
-              "data": {
-                "type": "object",
-                "description": "文本数据（type=text时存在）",
-                "optional": true
-              },
-              "files": {
-                "type": "array",
-                "description": "文件信息列表（type=file时存在）",
-                "optional": true,
-                "items": {
-                  "type": "object",
-                  "properties": {
-                    "filename": {
-                      "type": "string",
-                      "description": "文件名"
-                    },
-                    "size_bytes": {
-                      "type": "integer",
-                      "description": "文件大小（字节）"
-                    },
-                    "mime_type": {
-                      "type": "string",
-                      "description": "文件 MIME 类型"
-                    }
-                  }
-                }
-              }
+            "items": {
+              "type": "string",
+              "description": "文件名"
             }
           },
           "error": {
             "type": "string",
             "description": "错误信息（失败时）",
             "optional": true
-          },
-          "error_code": {
-            "type": "string",
-            "description": "错误代码（失败时）",
-            "optional": true,
-            "enum": [
-              "INVALID_URL",
-              "INVALID_QUERY",
-              "MISSING_API_URL",
-              "TIMEOUT",
-              "API_ERROR",
-              "FILE_DOWNLOAD_ERROR",
-              "FILE_SAVE_ERROR",
-              "TASK_FAILED",
-              "UNEXPECTED_ERROR"
-            ]
           }
         }
       },
@@ -121,7 +91,71 @@
         {
           "name": "BROWSER_API_URL",
           "description": "浏览器自动化后端 API 的地址，例如：http://192.168.1.218:52101",
-          "instructions": "请填写浏览器自动化服务的完整 URL 地址（包含协议和端口），服务需要支持 /agent/task 和 /downloads/{file_id} 接口",
+          "instructions": "请填写浏览器自动化服务的完整 URL 地址（包含协议和端口），服务需要支持 /agent/task、/downloads/{file_id} 和 /downloads/bundle/{session_id} 接口",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "download_bundle",
+      "description": "下载会话中生成的所有文件，打包为 ZIP 文件。适用于包含多个文件的任务结果。",
+      "parameters": [
+        {
+          "name": "session_id",
+          "type": "string",
+          "description": "会话ID（从 execute_browser_task 返回结果中获取）",
+          "required": true
+        },
+        {
+          "name": "timeout",
+          "type": "integer",
+          "description": "下载超时时间（秒），默认 120（2分钟）",
+          "required": false,
+          "default": 120
+        }
+      ],
+      "files": {
+        "output": {
+          "type": "array",
+          "items": {
+            "type": "OutputFile"
+          },
+          "description": "会话中生成的所有文件（ZIP 包）"
+        }
+      },
+      "returns": {
+        "type": "object",
+        "description": "下载结果",
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "description": "下载是否成功"
+          },
+          "message": {
+            "type": "string",
+            "description": "下载描述信息"
+          },
+          "files": {
+            "type": "array",
+            "description": "下载的文件列表",
+            "optional": true,
+            "items": {
+              "type": "string",
+              "description": "ZIP 文件名"
+            }
+          },
+          "error": {
+            "type": "string",
+            "description": "错误信息（失败时）",
+            "optional": true
+          }
+        }
+      },
+      "secrets": [
+        {
+          "name": "BROWSER_API_URL",
+          "description": "浏览器自动化后端 API 的地址，例如：http://192.168.1.218:52101",
+          "instructions": "请填写浏览器自动化服务的完整 URL 地址（包含协议和端口），服务需要支持 /agent/task、/downloads/{file_id} 和 /downloads/bundle/{session_id} 接口",
           "required": true
         }
       ]

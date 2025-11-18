@@ -3,6 +3,57 @@
 
 通过自然语言执行浏览器自动化任务,支持信息提取和文件下载。
 调用后端浏览器自动化 API 服务完成任务。
+
+主要功能:
+1. execute_browser_task: 执行浏览器自动化任务
+   - 支持自然语言描述任务
+   - 支持会话连续性（通过 session_id）
+   - 自动处理文件下载（内联或引用方式）
+   - 返回调试信息（执行时长、使用的工具等）
+
+2. download_bundle: 下载会话中生成的所有文件
+   - 将会话中的所有文件打包为 ZIP
+   - 适用于多文件任务结果
+
+环境变量配置:
+- BROWSER_API_URL: 后端 API 服务地址（必需）
+
+使用示例:
+    >>> # 单个 URL
+    >>> result = execute_browser_task(
+    ...     urls="https://example.com",
+    ...     query="提取页面标题和主要内容"
+    ... )
+    >>> print(result['success'])  # True
+    >>> print(result['session_id'])  # 'a1b2c3d4-...'
+
+    >>> # 多个 URL
+    >>> result = execute_browser_task(
+    ...     urls=["https://example.com", "https://github.com"],
+    ...     query="分别访问这些网站并截图"
+    ... )
+    >>> print(len(result['files']))  # 2
+
+    >>> # 会话连续性
+    >>> session = result['session_id']
+    >>> result2 = execute_browser_task(
+    ...     urls="https://example.com/page2",
+    ...     query="继续分析下一页",
+    ...     session_id=session
+    ... )
+
+    >>> # 下载文件包
+    >>> bundle = download_bundle(session)
+    >>> print(bundle['files'][0])
+
+返回结构:
+    {
+        "success": True/False,
+        "message": "任务执行描述",
+        "session_id": "会话ID",
+        "files": ["文件名"],  # 仅当有文件时
+        "error": "错误信息"  # 失败时存在
+    }
 """
 
 import os
@@ -14,19 +65,30 @@ import requests
 DATA_OUTPUTS = Path("data/outputs")
 
 
-def execute_browser_task(url: str, query: str, timeout: int = 600) -> dict:
+def execute_browser_task(
+    urls: str | list[str],
+    query: str,
+    session_id: Optional[str] = None,
+    timeout: int = 600
+) -> dict:
     """
     执行浏览器自动化任务
 
     通过自然语言描述任务，自动执行浏览器操作。
     支持网页访问、信息提取、文件下载等操作。
+    支持会话连续性，可通过 session_id 保持上下文。
 
     Args:
-        url: 目标网页 URL
+        urls: 目标网页 URL，可以是单个 URL 字符串或 URL 列表
+              - 单个: "https://example.com"
+              - 多个: ["https://example.com", "https://github.com"]
         query: 任务描述（自然语言），例如：
             - "提取页面的主要内容"
             - "下载最新的PDF文件"
             - "找到逾期承兑人名单并下载"
+            - "分别访问这些网站并截图"（多URL时）
+        session_id: 会话ID（可选），用于保持对话连续性。
+                   如果提供，将在相同会话中执行任务。
         timeout: 任务超时时间（秒），默认 600（10分钟）
 
     Returns:
@@ -34,41 +96,65 @@ def execute_browser_task(url: str, query: str, timeout: int = 600) -> dict:
         {
             "success": True/False,
             "message": "任务执行描述",
-            "result": {
-                "type": "text" | "file" | "mixed",
-                "data": {...},        # type=text 时存在
-                "files": [...]        # type=file 时存在
-            },
+            "session_id": "会话ID（用于后续请求或下载文件包）",
+            "files": ["文件名1", "文件名2"],  # 仅当有文件时存在
             "error": "错误信息"  # 失败时存在
         }
 
     Examples:
-        >>> execute_browser_task(
-        ...     url="https://example.com",
+        >>> # 单个 URL
+        >>> result = execute_browser_task(
+        ...     urls="https://example.com",
         ...     query="提取页面标题和主要内容"
         ... )
-        {'success': True, 'message': '成功提取页面内容', 'result': {...}}
+        >>> print(result['success'])  # True
 
-        >>> execute_browser_task(
-        ...     url="https://example.com/files",
+        >>> # 多个 URL
+        >>> result = execute_browser_task(
+        ...     urls=["https://example.com", "https://github.com"],
+        ...     query="分别访问这些网站并截图"
+        ... )
+        >>> print(result['files'])  # ['screenshot1.png', 'screenshot2.png']
+
+        >>> # 使用会话连续性
+        >>> session = result['session_id']
+        >>> result2 = execute_browser_task(
+        ...     urls="https://example.com/page2",
+        ...     query="继续分析下一页",
+        ...     session_id=session
+        ... )
+
+        >>> # 下载文件
+        >>> result3 = execute_browser_task(
+        ...     urls="https://example.com/files",
         ...     query="下载最新的PDF文件"
         ... )
-        {'success': True, 'message': '成功下载1个文件', 'result': {...}}
+        >>> if result3.get('files'):
+        ...     print(f"下载了文件: {result3['files']}")
     """
     try:
-        # 参数验证
-        if not url or not isinstance(url, str):
+        # 参数验证和规范化
+        if isinstance(urls, str):
+            # 单个 URL
+            url_list = [urls]
+        elif isinstance(urls, list):
+            # URL 列表
+            if not urls or not all(isinstance(u, str) for u in urls):
+                return {
+                    "success": False,
+                    "error": "URL 列表格式不正确"
+                }
+            url_list = urls
+        else:
             return {
                 "success": False,
-                "error": "url 参数必须是非空字符串",
-                "error_code": "INVALID_URL"
+                "error": "URL 格式不正确，应为字符串或字符串列表"
             }
 
         if not query or not isinstance(query, str):
             return {
                 "success": False,
-                "error": "query 参数必须是非空字符串",
-                "error_code": "INVALID_QUERY"
+                "error": "任务描述不能为空"
             }
 
         # 获取后端 API 地址
@@ -76,18 +162,28 @@ def execute_browser_task(url: str, query: str, timeout: int = 600) -> dict:
         if not api_base_url:
             return {
                 "success": False,
-                "error": "未配置 BROWSER_API_URL 环境变量",
-                "error_code": "MISSING_API_URL"
+                "error": "未配置 API 地址"
             }
 
         # 构建完整查询（包含 URL）
-        full_query = f"访问 {url}，然后{query}"
+        if len(url_list) == 1:
+            # 单个 URL
+            full_query = f"访问 {url_list[0]}，然后{query}"
+        else:
+            # 多个 URL
+            urls_text = "、".join(url_list)
+            full_query = f"访问以下网站：{urls_text}。然后{query}"
+
+        # 构建请求数据
+        request_data = {"query": full_query}
+        if session_id:
+            request_data["session_id"] = session_id
 
         # 调用后端 API
         api_url = f"{api_base_url.rstrip('/')}/agent/task"
         response = requests.post(
             api_url,
-            json={"query": full_query},
+            json=request_data,
             timeout=timeout
         )
 
@@ -104,20 +200,17 @@ def execute_browser_task(url: str, query: str, timeout: int = 600) -> dict:
     except requests.exceptions.Timeout:
         return {
             "success": False,
-            "error": f"任务超时（{timeout}秒）",
-            "error_code": "TIMEOUT"
+            "error": "任务超时"
         }
-    except requests.exceptions.RequestException as e:
+    except requests.exceptions.RequestException:
         return {
             "success": False,
-            "error": f"API 请求失败: {str(e)}",
-            "error_code": "API_ERROR"
+            "error": "API 请求失败"
         }
-    except Exception as e:
+    except Exception:
         return {
             "success": False,
-            "error": str(e),
-            "error_code": "UNEXPECTED_ERROR"
+            "error": "任务执行失败"
         }
 
 
@@ -129,74 +222,55 @@ def _process_success_result(api_result: Dict[str, Any]) -> dict:
         api_result: API 返回的原始结果
 
     Returns:
-        处理后的结果字典
+        处理后的结果字典，简化用户界面
     """
     result_data = api_result.get("result")
     response_text = api_result.get("response", "任务执行成功")
+    session_id = api_result.get("session_id")
+
+    # 构建基础响应（简化版，不包含技术细节）
+    base_response = {
+        "success": True,
+        "message": response_text,
+        "session_id": session_id
+    }
 
     # 情况1: 返回文件引用
     if result_data and result_data.get("type") == "file_reference":
         file_info = _download_file_from_api(api_result)
         if file_info:
-            return {
-                "success": True,
-                "message": response_text,
-                "result": {
-                    "type": "file",
-                    "files": [file_info]
-                }
-            }
+            # 简化文件信息，只返回文件名
+            base_response["files"] = [file_info.get("filename")]
+            return base_response
         else:
             return {
                 "success": False,
                 "error": "文件下载失败",
-                "error_code": "FILE_DOWNLOAD_ERROR"
+                "session_id": session_id
             }
 
     # 情况2: 返回内联文件
     elif result_data and result_data.get("type") == "file_inline":
         file_info = _save_inline_file(result_data)
         if file_info:
-            return {
-                "success": True,
-                "message": response_text,
-                "result": {
-                    "type": "file",
-                    "files": [file_info]
-                }
-            }
+            # 简化文件信息，只返回文件名
+            base_response["files"] = [file_info.get("filename")]
+            return base_response
         else:
             return {
                 "success": False,
                 "error": "文件保存失败",
-                "error_code": "FILE_SAVE_ERROR"
+                "session_id": session_id
             }
 
     # 情况3: 返回文本数据
     elif result_data and result_data.get("type") == "text":
-        return {
-            "success": True,
-            "message": response_text,
-            "result": {
-                "type": "text",
-                "data": {
-                    "content": result_data.get("content", "")
-                }
-            }
-        }
+        # 文本内容直接放在 message 中，不需要额外的 result 字段
+        return base_response
 
     # 情况4: 无具体结果，只有响应文本
     else:
-        return {
-            "success": True,
-            "message": response_text,
-            "result": {
-                "type": "text",
-                "data": {
-                    "content": response_text
-                }
-            }
-        }
+        return base_response
 
 
 def _process_error_result(api_result: Dict[str, Any]) -> dict:
@@ -207,21 +281,26 @@ def _process_error_result(api_result: Dict[str, Any]) -> dict:
         api_result: API 返回的原始结果
 
     Returns:
-        错误结果字典
+        简化的错误结果字典
     """
     error_info = api_result.get("error")
+    session_id = api_result.get("session_id")
+
     if isinstance(error_info, dict):
         error_message = error_info.get("message", "任务执行失败")
-        error_code = error_info.get("code", "TASK_FAILED")
     else:
         error_message = str(error_info) if error_info else "任务执行失败"
-        error_code = "TASK_FAILED"
 
-    return {
+    result = {
         "success": False,
-        "error": error_message,
-        "error_code": error_code
+        "error": error_message
     }
+
+    # 添加 session_id（如果存在）
+    if session_id:
+        result["session_id"] = session_id
+
+    return result
 
 
 def _download_file_from_api(api_result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -245,6 +324,9 @@ def _download_file_from_api(api_result: Dict[str, Any]) -> Optional[Dict[str, An
 
         # 构建下载 URL
         api_base_url = os.environ.get('BROWSER_API_URL')
+        if not api_base_url:
+            return None
+
         download_url = f"{api_base_url.rstrip('/')}/downloads/{file_id}"
 
         # 下载文件
@@ -306,3 +388,99 @@ def _save_inline_file(result_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
     except Exception:
         return None
+
+
+def download_bundle(session_id: str, timeout: int = 120) -> dict:
+    """
+    下载会话中生成的所有文件（打包为 ZIP）
+
+    将会话中生成的所有文件打包下载到 data/outputs/ 目录。
+    适用于包含多个文件的任务结果。
+
+    Args:
+        session_id: 会话ID（从 execute_browser_task 返回结果中获取）
+        timeout: 下载超时时间（秒），默认 120（2分钟）
+
+    Returns:
+        包含下载结果的字典：
+        {
+            "success": True/False,
+            "message": "下载描述",
+            "files": ["bundle_xxx.zip"],  # 成功时的文件名
+            "error": "错误信息"  # 失败时存在
+        }
+
+    Examples:
+        >>> # 执行任务并获取 session_id
+        >>> result = execute_browser_task(
+        ...     urls="https://example.com/files",
+        ...     query="下载所有PDF文件"
+        ... )
+        >>> session = result['session_id']
+
+        >>> # 下载文件包
+        >>> bundle_result = download_bundle(session)
+        >>> if bundle_result['success']:
+        ...     print(f"已下载文件包: {bundle_result['files'][0]}")
+    """
+    try:
+        # 参数验证
+        if not session_id or not isinstance(session_id, str):
+            return {
+                "success": False,
+                "error": "会话ID格式不正确"
+            }
+
+        # 获取后端 API 地址
+        api_base_url = os.environ.get('BROWSER_API_URL')
+        if not api_base_url:
+            return {
+                "success": False,
+                "error": "未配置 API 地址"
+            }
+
+        # 构建下载 URL
+        bundle_url = f"{api_base_url.rstrip('/')}/downloads/bundle/{session_id}"
+
+        # 下载文件包
+        response = requests.get(bundle_url, timeout=timeout)
+        response.raise_for_status()
+
+        # 确保输出目录存在
+        DATA_OUTPUTS.mkdir(parents=True, exist_ok=True)
+
+        # 保存 ZIP 文件
+        filename = f"bundle_{session_id[:8]}.zip"
+        output_path = DATA_OUTPUTS / filename
+        output_path.write_bytes(response.content)
+
+        return {
+            "success": True,
+            "message": f"成功下载文件包",
+            "files": [filename]
+        }
+
+    except requests.exceptions.HTTPError as e:
+        # 处理特定 HTTP 错误
+        if e.response.status_code == 404:
+            error_msg = "未找到该会话的文件"
+        elif e.response.status_code == 410:
+            error_msg = "文件已过期"
+        else:
+            error_msg = "下载失败"
+
+        return {
+            "success": False,
+            "error": error_msg
+        }
+
+    except requests.exceptions.Timeout:
+        return {
+            "success": False,
+            "error": "下载超时"
+        }
+    except Exception:
+        return {
+            "success": False,
+            "error": "下载失败"
+        }

@@ -1,6 +1,6 @@
 [project]
 name = "browser-automation-agent"
-version = "0.1.0"
+version = "0.2.0"
 description = "浏览器自动化代理预制件，通过自然语言执行浏览器自动化任务"
 readme = "README.md"
 requires-python = ">=3.11"
